@@ -114,23 +114,27 @@ export function parseMarketDate(input: unknown, now: Date = new Date()): Result<
   return { ok: true, value };
 }
 
-export interface LoginInput {
-  username: string;
-  password: string;
+export interface LoginProofInput {
+  nonce: string;
+  usernameHash: string;
+  proof: string;
 }
 
-/** Shape check only. Whether the credentials are correct is decided in lib/auth.ts. */
-export function parseLoginInput(input: unknown): Result<LoginInput> {
+const NONCE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * Shape check for the challenge-response login body. Whether the proof is
+ * correct is decided in lib/credentials.ts.
+ */
+export function parseLoginProofInput(input: unknown): Result<LoginProofInput> {
   if (!input || typeof input !== "object") return { ok: false, error: "Invalid request." };
-  const { username, password } = input as Record<string, unknown>;
-  if (typeof username !== "string" || username.trim() === "") {
-    return { ok: false, error: "Please enter your username." };
+  const { nonce, usernameHash, proof } = input as Record<string, unknown>;
+  if (typeof nonce !== "string" || !NONCE_PATTERN.test(nonce)) {
+    return { ok: false, error: "The login form has expired. Please try again." };
   }
-  if (typeof password !== "string" || password === "") {
-    return { ok: false, error: "Please enter your password." };
+  if (typeof usernameHash !== "string" || !HEX64.test(usernameHash) || typeof proof !== "string" || !HEX64.test(proof)) {
+    return { ok: false, error: "Invalid request." };
   }
-  if (username.length > 200 || password.length > 500) {
-    return { ok: false, error: "Invalid username or password." };
-  }
-  return { ok: true, value: { username: username.trim(), password } };
+  return { ok: true, value: { nonce, usernameHash, proof } };
 }

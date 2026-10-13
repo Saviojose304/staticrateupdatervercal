@@ -37,6 +37,11 @@ before(async () => {
         case "SET":
           data.set(args[0], String(args[1]));
           return send(200, { result: "OK" });
+        case "GETDEL": {
+          const value = data.get(args[0]) ?? null;
+          data.delete(args[0]);
+          return send(200, { result: value });
+        }
         case "DEL":
           return send(200, { result: data.delete(args[0]) ? 1 : 0 });
         case "EVAL": {
@@ -72,6 +77,13 @@ test("publishes and reads a rate through the REST protocol", async () => {
   const rec = await getCurrentRate();
   assert.equal(rec?.rate, 15550);
   assert.ok(seenCommands.includes("SET") && seenCommands.includes("GET"));
+});
+
+test("GETDEL reads once", async () => {
+  mode = "normal";
+  await getStore().set("once", "v", 60);
+  assert.equal(await getStore().take("once"), "v");
+  assert.equal(await getStore().take("once"), null);
 });
 
 test("counter and TTL commands work", async () => {

@@ -9,7 +9,8 @@ One permanent link for customers. The admin updates the rate from a phone, and a
 | `/admin` | Admin (protected) | View, publish and share the rate |
 | `GET /api/rate` | Public | Current published rate as JSON |
 | `POST /api/rate` | Admin session | Publish a new rate |
-| `POST /api/admin/login` | — | Create an admin session |
+| `GET /api/admin/login` | — | Issue a one-time login challenge |
+| `POST /api/admin/login` | — | Verify the challenge proof and create an admin session |
 | `POST /api/admin/logout` | — | End the admin session |
 
 **Stack:** Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4 · Vercel · Upstash Redis (managed key-value store via the Vercel Marketplace). No traditional database and no separate backend.
@@ -45,7 +46,8 @@ Admin phone ──POST /api/rate (session cookie)──► validate ──SET─
 - **Server timestamps.** `updatedAt` is always set by the server. Times are shown in IST whatever the phone's settings.
 
 ### Security
-- Credentials are checked on the server only, with a constant-time comparison. They come from environment variables that are never sent to the browser (no `NEXT_PUBLIC_` prefix).
+- **The username and password are never sent over the network.** Login uses a one-time challenge: the browser asks for a random nonce (`GET /api/admin/login`, valid 2 minutes, single use). It sends back only `SHA-256(username)` and `HMAC-SHA256(SHA-256(password), nonce)`. The server computes the same from its environment variables and compares in constant time. A request copied from DevTools cannot be replayed, because the nonce is already used. HTTPS still encrypts everything in transit.
+- The admin credentials live only in environment variables, which are never sent to the browser (no `NEXT_PUBLIC_` prefix).
 - Sessions use a random 256-bit ID, HMAC-signed with `SESSION_SECRET` and also recorded in Redis with an 8-hour expiry. **Logout deletes the server-side record**, so a copied cookie stops working immediately. No in-memory sessions are used, because serverless instances do not share memory.
 - Cookie: `__Host-rate_admin`, `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`.
 - State-changing APIs also check the `Origin` / `Sec-Fetch-Site` headers to block cross-site requests.

@@ -2,7 +2,29 @@
 
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
+import { buildLoginProof, isWebCryptoAvailable } from "@/lib/login-proof";
 import { AlertIcon, EyeIcon, Spinner } from "./icons";
+
+type ApiResult = { ok?: boolean; nonce?: string; code?: string; message?: string } | null;
+
+/**
+ * Challenge-response login: fetch a one-time nonce, then send only
+ * SHA-256(username) and an HMAC proof. The password never leaves the browser.
+ */
+async function attemptLogin(username: string, password: string): Promise<{ response: Response; data: ApiResult }> {
+  const challengeResponse = await fetch("/api/admin/login", { method: "GET", cache: "no-store" });
+  const challenge = (await challengeResponse.json().catch(() => null)) as ApiResult;
+  if (!challengeResponse.ok || !challenge?.nonce) return { response: challengeResponse, data: challenge };
+
+  const { usernameHash, proof } = await buildLoginProof(challenge.nonce, username, password);
+  const response = await fetch("/api/admin/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nonce: challenge.nonce, usernameHash, proof }),
+    cache: "no-store",
+  });
+  return { response, data: (await response.json().catch(() => null)) as ApiResult };
+}
 
 const inputClass =
   "block w-full rounded-xl border-0 bg-white px-4 py-3 text-base text-slate-900 shadow-sm ring-1 ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-emerald-600 focus:outline-none";
@@ -22,16 +44,18 @@ export default function LoginForm({ notice }: { notice: string | null }) {
     if (!username.trim()) return setError("Please enter your username.");
     if (!password) return setError("Please enter your password.");
 
+    if (!isWebCryptoAvailable()) {
+      return setError("Secure login needs the https:// address of this site.");
+    }
+
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch("/api/admin/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-        cache: "no-store",
-      });
-      const data = (await response.json().catch(() => null)) as { ok?: boolean; message?: string } | null;
+      let { response, data } = await attemptLogin(username, password);
+      // A challenge is valid for 2 minutes and single-use; retry once with a fresh one.
+      if (response.status === 400 && data?.code === "CHALLENGE_EXPIRED") {
+        ({ response, data } = await attemptLogin(username, password));
+      }
 
       if (response.ok && data?.ok) {
         setPassword("");
@@ -48,6 +72,8 @@ export default function LoginForm({ notice }: { notice: string | null }) {
 
   return (
     <form
+      method="post"
+      action="/admin/login"
       onSubmit={handleSubmit}
       noValidate
       className="space-y-5 rounded-3xl bg-white p-6 shadow-[0_8px_30px_rgb(15_23_42/0.08)] ring-1 ring-slate-200"
@@ -71,7 +97,6 @@ export default function LoginForm({ notice }: { notice: string | null }) {
         </label>
         <input
           id="username"
-          name="username"
           type="text"
           autoComplete="username"
           autoCapitalize="none"
@@ -92,7 +117,6 @@ export default function LoginForm({ notice }: { notice: string | null }) {
         <div className="relative">
           <input
             id="password"
-            name="password"
             type={showPassword ? "text" : "password"}
             autoComplete="current-password"
             required
