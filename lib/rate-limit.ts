@@ -35,3 +35,12 @@ export async function recordFailedLogin(ip: string): Promise<number> {
 export async function clearFailedLogins(ip: string): Promise<void> {
   await getStore().del(key(ip));
 }
+
+export const MAX_CHALLENGES_PER_MINUTE = 20;
+
+/** Limits how fast one IP can request login challenges (protects the storage quota). */
+export async function allowChallengeRequest(ip: string): Promise<boolean> {
+  const challengeKey = "login-challenge-rate:" + createHash("sha256").update(ip).digest("hex").slice(0, 32);
+  const count = await getStore().incrementWithWindow(challengeKey, 60);
+  return count <= MAX_CHALLENGES_PER_MINUTE;
+}

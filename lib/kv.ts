@@ -21,6 +21,8 @@ export interface KeyValueStore {
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSeconds?: number): Promise<void>;
   del(key: string): Promise<void>;
+  /** Atomically reads and deletes a key (GETDEL). Returns null if it did not exist. */
+  take(key: string): Promise<string | null>;
   /** Atomically increments a counter, starting its expiry window on the first increment. */
   incrementWithWindow(key: string, windowSeconds: number): Promise<number>;
   /** Remaining seconds before the key expires; -2 if missing, -1 if no expiry. */
@@ -64,6 +66,9 @@ class UpstashRestStore implements KeyValueStore {
       });
     }
 
+    if (response.status === 401 || response.status === 403) {
+      throw new StorageError(`Storage rejected the access token (HTTP ${response.status}). Check KV_REST_API_TOKEN.`);
+    }
     if (!response.ok || payload.error) {
       // payload.error comes from Upstash and never contains our token.
       throw new StorageError(`Storage error (HTTP ${response.status}): ${payload.error ?? "unknown"}`);
@@ -85,6 +90,11 @@ class UpstashRestStore implements KeyValueStore {
 
   async del(key: string) {
     await this.command<number>(["DEL", key]);
+  }
+
+  async take(key: string) {
+    const result = await this.command<string | null>(["GETDEL", key]);
+    return result ?? null;
   }
 
   async incrementWithWindow(key: string, windowSeconds: number) {
@@ -126,6 +136,12 @@ export class MemoryStore implements KeyValueStore {
     this.data.delete(key);
   }
 
+  async take(key: string) {
+    const value = this.live(key)?.value ?? null;
+    this.data.delete(key);
+    return value;
+  }
+
   async incrementWithWindow(key: string, windowSeconds: number) {
     const entry = this.live(key);
     if (!entry) {
@@ -162,7 +178,8 @@ export function getStore(): KeyValueStore {
 
   if (isProduction()) {
     throw new StorageError(
-      "Storage is not configured: set KV_REST_API_URL and KV_REST_API_TOKEN (or the UPSTASH_REDIS_REST_* equivalents)."
+      "Storage is not configured: no KV_REST_API_URL/KV_REST_API_TOKEN (or UPSTASH_REDIS_REST_* / prefixed equivalents) " +
+        "found in this deployment. Connect Upstash in Vercel → Storage, then redeploy."
     );
   }
 

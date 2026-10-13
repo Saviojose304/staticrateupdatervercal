@@ -6,12 +6,13 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { formatINR, formatMarketDate, formatISTTime, formatISTDateTime, todayInIST } from "../lib/format";
-import { parseRate, parseMarketDate, parseLoginInput } from "../lib/validation";
+import { parseRate, parseMarketDate, parseLoginProofInput } from "../lib/validation";
 import { MemoryStore, setStoreForTesting, StorageError, type KeyValueStore } from "../lib/kv";
 import { getCurrentRate, publishRate, RATE_KEY } from "../lib/rate-store";
 import { createSession, verifySession, destroySession, parseSignedToken, SESSION_TTL_SECONDS } from "../lib/session";
 import { getLoginBlock, recordFailedLogin, clearFailedLogins, MAX_FAILED_ATTEMPTS } from "../lib/rate-limit";
-import { credentialsMatch } from "../lib/credentials";
+import { consumeChallenge, issueChallenge, verifyLoginProof, computeLoginProof, hashUsername } from "../lib/credentials";
+import { buildLoginProof } from "../lib/login-proof";
 
 const SECRET = "x".repeat(48);
 let store: MemoryStore;
@@ -79,18 +80,42 @@ test("validates market dates", () => {
   assert.equal(parseMarketDate(undefined, now).ok, false);
 });
 
-test("validates login input shape", () => {
-  assert.equal(parseLoginInput({ username: "a", password: "b" }).ok, true);
-  assert.equal(parseLoginInput({ username: "", password: "b" }).ok, false);
-  assert.equal(parseLoginInput({ username: "a" }).ok, false);
-  assert.equal(parseLoginInput("nope").ok, false);
+test("validates login proof input shape", () => {
+  const nonce = "a".repeat(43);
+  const hex = "0".repeat(64);
+  assert.equal(parseLoginProofInput({ nonce, usernameHash: hex, proof: hex }).ok, true);
+  assert.equal(parseLoginProofInput({ nonce: "short", usernameHash: hex, proof: hex }).ok, false);
+  assert.equal(parseLoginProofInput({ nonce, usernameHash: "admin", proof: hex }).ok, false);
+  assert.equal(parseLoginProofInput({ username: "admin", password: "secret" }).ok, false, "plain credentials are no longer accepted");
+  assert.equal(parseLoginProofInput("nope").ok, false);
 });
 
-test("credential comparison", () => {
-  const expected = { username: "admin", password: "S3cret!pass" };
-  assert.equal(credentialsMatch({ username: "admin", password: "S3cret!pass" }, expected), true);
-  assert.equal(credentialsMatch({ username: "admin", password: "wrong" }, expected), false);
-  assert.equal(credentialsMatch({ username: "other", password: "S3cret!pass" }, expected), false);
+test("browser proof (Web Crypto) matches the server's computation", async () => {
+  const expected = { username: "admin", password: "S3cret!pass ₹" };
+  const nonce = await issueChallenge();
+  const fromBrowser = await buildLoginProof(nonce, " admin ", "S3cret!pass ₹");
+  assert.equal(fromBrowser.usernameHash, hashUsername("admin"));
+  assert.equal(fromBrowser.proof, computeLoginProof(nonce, hashUsername("admin"), expected.password));
+  assert.equal(verifyLoginProof({ nonce, ...fromBrowser }, expected), true);
+
+  // the request body never contains the password or username
+  const body = JSON.stringify({ nonce, ...fromBrowser });
+  assert.ok(!body.includes("S3cret") && !body.includes("admin"));
+
+  const wrongPass = await buildLoginProof(nonce, "admin", "wrong");
+  assert.equal(verifyLoginProof({ nonce, ...wrongPass }, expected), false);
+  const wrongUser = await buildLoginProof(nonce, "other", expected.password);
+  assert.equal(verifyLoginProof({ nonce, ...wrongUser }, expected), false);
+  const otherNonce = await issueChallenge();
+  assert.equal(verifyLoginProof({ nonce: otherNonce, ...fromBrowser }, expected), false, "proof is bound to its nonce");
+});
+
+test("login challenges are single-use", async () => {
+  const nonce = await issueChallenge();
+  assert.equal(await consumeChallenge(nonce), true);
+  assert.equal(await consumeChallenge(nonce), false, "replay must fail");
+  assert.equal(await consumeChallenge("x".repeat(43)), false, "unknown nonce");
+  assert.equal(await consumeChallenge("bad"), false, "malformed nonce");
 });
 
 // ---------- rate storage ----------
@@ -184,4 +209,17 @@ test("IST formatting edge cases: midnight, noon, month names", () => {
   assert.equal(formatMarketDate("2026-01-05"), "5 January 2026");
   assert.equal(todayInIST(new Date("2026-12-31T18:29:59Z")), "2026-12-31");
   assert.equal(todayInIST(new Date("2026-12-31T18:30:00Z")), "2027-01-01");
+});
+
+test("finds Upstash credentials under default, Upstash, prefixed and Redis-URL names", async () => {
+  const { findStorageConfig } = await import("../lib/env");
+  assert.equal(findStorageConfig({}).config, null);
+  assert.equal(findStorageConfig({ KV_REST_API_URL: "https://a.upstash.io/", KV_REST_API_TOKEN: "t" }).config?.url, "https://a.upstash.io");
+  assert.equal(findStorageConfig({ UPSTASH_REDIS_REST_URL: "https://b.upstash.io", UPSTASH_REDIS_REST_TOKEN: "t" }).source, "UPSTASH_REDIS_REST_URL");
+  const prefixed = findStorageConfig({ STORAGE_KV_REST_API_URL: "https://c.upstash.io", STORAGE_KV_REST_API_TOKEN: "tok" });
+  assert.deepEqual(prefixed, { config: { url: "https://c.upstash.io", token: "tok" }, source: "STORAGE_KV_REST_API_URL" });
+  const fromRedisUrl = findStorageConfig({ REDIS_URL: "rediss://default:secret%3Dx@d-1.upstash.io:6379" });
+  assert.deepEqual(fromRedisUrl.config, { url: "https://d-1.upstash.io", token: "secret=x" });
+  assert.equal(findStorageConfig({ REDIS_URL: "redis://localhost:6379" }).config, null);
+  assert.equal(findStorageConfig({ KV_REST_API_URL: "https://x", KV_REST_API_TOKEN: "" }).config, null);
 });

@@ -51,10 +51,59 @@ export interface StorageConfig {
  * UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN names. Both are accepted.
  */
 export function getStorageConfig(): StorageConfig | null {
-  const url = (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "").trim();
-  const token = (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
-  if (!url || !token) return null;
-  return { url: url.replace(/\/+$/, ""), token };
+  return findStorageConfig(process.env).config;
+}
+
+/**
+ * Finds Upstash REST credentials in the environment. Tries, in order:
+ *  1. KV_REST_API_URL / KV_REST_API_TOKEN (Vercel Marketplace default)
+ *  2. UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN (Upstash console)
+ *  3. Any custom prefix chosen when connecting the store in Vercel,
+ *     e.g. STORAGE_KV_REST_API_URL / STORAGE_KV_REST_API_TOKEN
+ *  4. A Redis connection URL (KV_URL, REDIS_URL or <PREFIX>_KV_URL / <PREFIX>_REDIS_URL)
+ *     pointing at Upstash: rediss://default:<token>@<host>:6379 → https://<host> + <token>
+ *
+ * `source` names the variable that was used (never its value) for diagnostics.
+ */
+export function findStorageConfig(env: Record<string, string | undefined>): { config: StorageConfig | null; source: string | null } {
+  const val = (name: string) => (env[name] ?? "").trim();
+  const make = (url: string, token: string, source: string) => ({
+    config: { url: url.replace(/\/+$/, ""), token },
+    source,
+  });
+
+  const urlSuffixes: [string, string][] = [
+    ["KV_REST_API_URL", "KV_REST_API_TOKEN"],
+    ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
+  ];
+
+  for (const [u, t] of urlSuffixes) {
+    if (val(u) && val(t)) return make(val(u), val(t), u);
+  }
+  for (const [u, t] of urlSuffixes) {
+    for (const name of Object.keys(env)) {
+      if (name.endsWith(`_${u}`)) {
+        const prefix = name.slice(0, -u.length);
+        if (val(name) && val(prefix + t)) return make(val(name), val(prefix + t), name);
+      }
+    }
+  }
+
+  const redisUrlNames = Object.keys(env).filter(
+    (n) => n === "KV_URL" || n === "REDIS_URL" || n.endsWith("_KV_URL") || n.endsWith("_REDIS_URL")
+  );
+  for (const name of redisUrlNames) {
+    try {
+      const parsed = new URL(val(name));
+      if ((parsed.protocol === "rediss:" || parsed.protocol === "redis:") && parsed.hostname.endsWith(".upstash.io") && parsed.password) {
+        return make(`https://${parsed.hostname}`, decodeURIComponent(parsed.password), name);
+      }
+    } catch {
+      // not a URL; ignore
+    }
+  }
+
+  return { config: null, source: null };
 }
 
 export function isProduction(): boolean {
