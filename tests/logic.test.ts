@@ -145,6 +145,7 @@ test("a failed write leaves the previous rate in place", async () => {
       throw new StorageError("simulated outage");
     },
     del: (k) => store.del(k),
+    take: (k) => store.take(k),
     incrementWithWindow: (k, w) => store.incrementWithWindow(k, w),
     ttl: (k) => store.ttl(k),
   };
